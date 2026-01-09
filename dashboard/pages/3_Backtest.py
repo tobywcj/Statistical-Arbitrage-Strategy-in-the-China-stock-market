@@ -14,16 +14,41 @@ from app.analytics.clustering import calculate_log_returns, get_correlation_matr
 from app.analytics.strategy import calculate_cluster_returns, calculate_residuals, calculate_z_scores, generate_signals
 from app.analytics.backtest import run_backtest
 
+from app.providers.fallback import check_mongo_connection, fetch_bars_direct, get_fallback_instruments, get_db_overall_range
+
 st.set_page_config(page_title="Backtest", page_icon="🧪", layout="wide")
 st.title("🧪 Strategy Backtest")
 
-# --- Helper ---
-@st.cache_resource
-def get_db():
-    return db
+# --- Fallback Check ---
+if "db_connected" not in st.session_state:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    st.session_state["db_connected"] = loop.run_until_complete(check_mongo_connection())
 
+if not st.session_state["db_connected"]:
+    st.warning("⚠️ **Direct-Fetch Mode Active**: Data is being fetched directly from Yahoo Finance. **Note: Backtest will be limited to a sample of 30 stocks for speed.**")
+else:
+    st.success("✅ **Local Database Mode Active**: Data is being served from MongoDB.")
+
+# --- Helper ---
 @st.cache_data(ttl=300)
 def load_data_for_backtest(exchange, start, end):
+    if not st.session_state["db_connected"]:
+        # Demo Mode: Sample 30 stocks
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        instruments = loop.run_until_complete(get_fallback_instruments())
+        tickers = [i.ticker for i in instruments][:30]
+        
+        all_bars = []
+        progress_bar = st.progress(0, text="Fetching backtest data from Yahoo...")
+        for i, t in enumerate(tickers):
+            progress_bar.progress((i + 1) / len(tickers), text=f"Fetching {t} ({i+1}/{len(tickers)})")
+            bars = fetch_bars_direct(t, start, end)
+            all_bars.extend([b.model_dump(by_alias=True) for b in bars])
+        progress_bar.empty()
+        return all_bars
+
     async def _fetch():
         from motor.motor_asyncio import AsyncIOMotorClient
         from app.db.mongo import settings
@@ -50,7 +75,23 @@ with st.sidebar:
     st.header("Settings")
     
     st.subheader("Data")
-    start_date = st.date_input("Start Date", datetime.utcnow() - timedelta(days=365*2))
+    lookback_years = st.selectbox(
+        "Lookback Years",
+        options=list(range(1, 9)),
+        index=1, # Default to 2 years
+        help="Select the number of years of historical data to load for backtesting."
+    )
+    
+    if st.session_state["db_connected"]:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        db_range = loop.run_until_complete(get_db_overall_range())
+        if db_range:
+            st.sidebar.caption(f"📦 **DB Coverage**: {db_range['min_date'].date()} to {db_range['max_date'].date()}")
+        else:
+            st.sidebar.caption("📦 **DB Coverage**: No data found.")
+
+    start_date = st.date_input("Start Date", datetime.utcnow() - timedelta(days=365*lookback_years))
     end_date = st.date_input("End Date", datetime.utcnow())
     
     st.subheader("Clustering")

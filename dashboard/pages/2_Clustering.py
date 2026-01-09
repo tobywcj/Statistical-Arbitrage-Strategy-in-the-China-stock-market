@@ -10,19 +10,42 @@ import os
 # Add root directory to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from app.db.mongo import db
+from app.providers.fallback import check_mongo_connection, fetch_bars_direct, get_fallback_instruments, get_db_overall_range
 from app.analytics.clustering import calculate_log_returns, get_correlation_matrix, cluster_hierarchical, cluster_spectral
 
 st.set_page_config(page_title="Clustering Analysis", page_icon="🧬", layout="wide")
 st.title("🧬 Clustering Analysis")
 
-# --- Helper ---
-@st.cache_resource
-def get_db():
-    return db
+# --- Fallback Check ---
+if "db_connected" not in st.session_state:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    st.session_state["db_connected"] = loop.run_until_complete(check_mongo_connection())
 
+if not st.session_state["db_connected"]:
+    st.warning("⚠️ **Direct-Fetch Mode Active**: Data is being fetched directly from Yahoo Finance. **Note: This process is intensive and will take a few minutes.**")
+else:
+    st.success("✅ **Local Database Mode Active**: Data is being served from MongoDB.")
+
+# --- Helper ---
 @st.cache_data(ttl=300)
 def load_all_prices(exchange, start, end):
+    if not st.session_state["db_connected"]:
+        # Demo Mode: Use a subset of tickers and fetch directly
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        instruments = loop.run_until_complete(get_fallback_instruments())
+        tickers = [i.ticker for i in instruments][:30] # Limit to 30 for demo speed
+        
+        all_bars = []
+        progress_bar = st.progress(0, text="Fetching data from Yahoo Finance...")
+        for i, t in enumerate(tickers):
+            progress_bar.progress((i + 1) / len(tickers), text=f"Fetching {t} ({i+1}/{len(tickers)})")
+            bars = fetch_bars_direct(t, start, end)
+            all_bars.extend([b.model_dump(by_alias=True) for b in bars])
+        progress_bar.empty()
+        return tickers, all_bars
+
     async def _fetch():
         from motor.motor_asyncio import AsyncIOMotorClient
         from app.db.mongo import settings
@@ -41,7 +64,6 @@ def load_all_prices(exchange, start, end):
             "exchange": exchange, 
             "date": {"$gte": start, "$lte": end}
         }
-        # Optimize: can be heavy
         cursor = bars_coll.find(query)
         data = await cursor.to_list(length=None)
         client.close()
@@ -52,10 +74,27 @@ def load_all_prices(exchange, start, end):
     return loop.run_until_complete(_fetch())
 
 # --- UI ---
+st.sidebar.markdown("### 📅 Time Range")
+lookback_years = st.sidebar.selectbox(
+    "Lookback Years",
+    options=list(range(1, 9)),
+    index=1, # Default to 2 years
+    help="Select the number of years of historical data to analyze."
+)
+
+if st.session_state["db_connected"]:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    db_range = loop.run_until_complete(get_db_overall_range())
+    if db_range:
+        st.sidebar.caption(f"📦 **DB Coverage**: {db_range['min_date'].date()} to {db_range['max_date'].date()}")
+    else:
+        st.sidebar.caption("📦 **DB Coverage**: No data found.")
+
 exchange = "SSE"
 col1, col2, col3 = st.columns(3)
 with col1:
-    start_date = st.date_input("Start Date", datetime.utcnow() - timedelta(days=365))
+    start_date = st.date_input("Start Date", datetime.utcnow() - timedelta(days=365*lookback_years))
 with col2:
     end_date = st.date_input("End Date", datetime.utcnow())
 with col3:

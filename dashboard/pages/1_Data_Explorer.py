@@ -9,22 +9,31 @@ import os
 # Add root directory to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-from app.db.mongo import db
-from app.db.schema import Bar
+from app.providers.fallback import check_mongo_connection, fetch_bars_direct, get_fallback_instruments, get_db_overall_range
 
 st.set_page_config(page_title="Data Explorer", page_icon="🔍", layout="wide")
 
 st.title("🔍 Data Explorer")
 
-# --- Data Loading ---
-@st.cache_resource
-def get_db_connection():
-    # Helper to ensure we don't re-connect unnecessarily, 
-    # though db.connect() is robust.
-    return db
+# --- Fallback Check ---
+if "db_connected" not in st.session_state:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    st.session_state["db_connected"] = loop.run_until_complete(check_mongo_connection())
 
+if not st.session_state["db_connected"]:
+    st.warning("⚠️ **Direct-Fetch Mode Active**: Data is being fetched directly from Yahoo Finance. No local database is being used.")
+else:
+    st.success("✅ **Local Database Mode Active**: Data is being served from MongoDB.")
+
+# --- Data Loading ---
 @st.cache_data(ttl=300)
 def load_instruments():
+    if not st.session_state["db_connected"]:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(get_fallback_instruments())
+        
     async def _fetch():
         from motor.motor_asyncio import AsyncIOMotorClient
         from app.db.mongo import settings
@@ -46,6 +55,13 @@ def load_instruments():
 
 @st.cache_data(ttl=60)
 def load_bars(ticker, start, end):
+    if not st.session_state["db_connected"]:
+        # Direct fetch from Yahoo
+        data = fetch_bars_direct(ticker, start, end)
+        if data:
+            return pd.DataFrame([b.model_dump(by_alias=True) for b in data])
+        return pd.DataFrame()
+
     async def _fetch():
         from motor.motor_asyncio import AsyncIOMotorClient
         from app.db.mongo import settings
@@ -71,17 +87,40 @@ def load_bars(ticker, start, end):
     return pd.DataFrame()
 
 # --- UI Controls ---
+st.sidebar.markdown("### 📅 Time Range")
+lookback_years = st.sidebar.selectbox(
+    "Lookback Years",
+    options=list(range(1, 9)),
+    index=1, # Default to 2 years
+    help="Select the number of years of historical data to load."
+)
+
+if st.session_state["db_connected"]:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    db_range = loop.run_until_complete(get_db_overall_range())
+    if db_range:
+        st.sidebar.caption(f"📦 **DB Coverage**: {db_range['min_date'].date()} to {db_range['max_date'].date()}")
+    else:
+        st.sidebar.caption("📦 **DB Coverage**: No data found.")
 
 instruments = load_instruments()
 if not instruments:
-    st.warning("No instruments found. Please run `python -m scripts.load_instruments`")
+    st.warning("No instruments found.")
     st.stop()
 
-ticker_list = sorted([i['ticker'] for i in instruments])
+ticker_list = sorted([i['ticker'] for i in (instruments if isinstance(instruments[0], dict) else [i.model_dump() for i in instruments])])
 ticker = st.selectbox("Select Ticker", ticker_list)
 
 @st.cache_data(ttl=300)
-def get_date_range(ticker):
+def get_date_range(ticker, years):
+    if not st.session_state["db_connected"]:
+        # For fallback, use the selected years
+        return {
+            "min_date": datetime.utcnow() - timedelta(days=365*years),
+            "max_date": datetime.utcnow()
+        }
+
     async def _fetch():
         from motor.motor_asyncio import AsyncIOMotorClient
         from app.db.mongo import settings
@@ -109,12 +148,15 @@ def get_date_range(ticker):
 
 col1, col2 = st.columns(2)
 
-date_range = get_date_range(ticker)
+date_range = get_date_range(ticker, lookback_years)
 if date_range:
     min_dt = date_range["min_date"]
     max_dt = date_range["max_date"]
     
-    st.caption(f"Available Data: {min_dt.date()} to {max_dt.date()}")
+    if st.session_state["db_connected"]:
+        st.caption(f"Available Data: {min_dt.date()} to {max_dt.date()}")
+    else:
+        st.caption("Mode: Real-time fetch (Direct from Yahoo Finance)")
     
     with col1:
         start_date = st.date_input(
