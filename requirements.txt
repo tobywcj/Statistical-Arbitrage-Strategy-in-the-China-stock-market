@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+motor
+dnspython
+pydantic
+pydantic-settings
+pandas
+numpy
+scipy
+scikit-learn
+seaborn
+yfinance
+streamlit
+plotly
+httpx
+python-dotenv
+websockets

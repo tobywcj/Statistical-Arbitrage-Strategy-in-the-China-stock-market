@@ -1,0 +1,13 @@
+services:
+  # 1. The list of "machines" we want to run
+  mongo:
+    # 2. Name of our database service
+    image: mongo:latest # 3. The software to install
+    ports:
+      - "27017:27017" # 4. Opening a door to access it
+    volumes:
+      - mongo_data:/data/db # 5. Where to save the files
+
+volumes:
+  # 6. Persistent storage definition
+  mongo_data:
