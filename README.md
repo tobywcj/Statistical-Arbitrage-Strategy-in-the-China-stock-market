@@ -2,6 +2,8 @@
 
 A professional quantitative trading system designed for the Shanghai Stock Exchange (SSE). This project identifies statistical co-movements between stocks and executes a dollar-neutral mean-reversion strategy based on cluster residuals.
 
+Try this live demo on: [CLick this Streamlit App](https://statistical-arbitrage-strategy-in-the-china-stock-market.streamlit.app/)
+
 ## 🚀 Overview
 
 This system automates the end-to-end pipeline of a Statistical Arbitrage strategy:
